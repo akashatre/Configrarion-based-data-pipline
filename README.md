@@ -43,4 +43,5 @@ The project consists of three main Lambda functions:
 ### Installation
 1. Clone the repository:
    ```bash
-   
+   git clone https://github.com/akashatre/-Configrarion-based-data-pipline.git
+   cd -Configrarion-based-data-pipline
