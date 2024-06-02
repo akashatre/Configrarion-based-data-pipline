@@ -1,0 +1,76 @@
+import os
+import json
+import boto3
+from shareplum import Office365, Site
+from shareplum.site import Version
+from datetime import datetime
+
+
+class SharePointS3Uploader:
+    def __init__(self, sharepoint_url, sharepoint_username, sharepoint_password, sharepoint_site_url,dynamodb_table_name):
+        self.sharepoint_url = sharepoint_url
+        self.sharepoint_username = sharepoint_username
+        self.sharepoint_password = sharepoint_password
+        self.sharepoint_site_url = sharepoint_site_url
+        
+        self.dynamodb_table_name = dynamodb_table_name
+        self.dynamodb_client = boto3.client('dynamodb')
+        
+
+    def config_sharepoint(self):
+        try :
+            authcookie = Office365(self.sharepoint_url, username=self.sharepoint_username, password=self.sharepoint_password).GetCookies()
+            self.site = Site(self.sharepoint_site_url, version=Version.v365, authcookie=authcookie)
+        except Exception as e :
+            print(f'SharePoint Configration failed as {e}, {type(e)=}')
+      
+
+       
+
+    def upload_files_to_s3(self):
+        response = self.dynamodb_client.scan(TableName=self.dynamodb_table_name)
+        files_info =  response['Items']
+
+        for file_info in files_info:
+            if file_info['get_file']['S'] == 'N':
+                
+                file_name = file_info['fileName']['S']
+                file_group_id = file_info['fileGroupID']['S']
+                file_id = file_info['fileID']['S']
+                file_path = file_info['landing-rawBucket-path']['S']
+                folder_path = file_info['secrets']['M']['sharepointpath']['S']
+                s3_bucket_name = file_info ['landing-rawBucket']['S']
+                
+                folder = self.site.Folder(folder_path)
+                file_content = folder.get_file(file_name)
+                try :
+                    current_date = datetime.now()
+                    s3_bucket_key = f'{file_path}/{current_date.year}/{current_date.month}/{current_date.day}/{file_name}'
+                    s3 = boto3.client('s3')
+                  
+                    s3.put_object(Bucket=s3_bucket_name, Key=s3_bucket_key, Body=file_content)
+        
+                    print(f'File uploaded to S3 successfully at s3://{s3_bucket_name}/{s3_bucket_key}')
+                except Exception as error:
+                    print(f"Unexpected {error=}, {type(error)=}")
+                
+ 
+
+def lambda_handler(event, context):
+    session = boto3.session.Session()
+    client = session.client(service_name='secretsmanager', region_name= 'ap-south-1' )
+    secret_value_response = client.get_secret_value(SecretId=os.environ['Secretmanager_name'])
+    secret_dict = json.loads(secret_value_response['SecretString'])
+    
+    sharepoint_url = secret_dict['url']
+    sharepoint_username = secret_dict['user_name']
+    sharepoint_password = secret_dict['password']
+    sharepoint_site_url =secret_dict['site_url']
+    dynamodb_table_name = os.environ['dyamo_table_name']
+    
+
+    uploader = SharePointS3Uploader(sharepoint_url, sharepoint_username, sharepoint_password, sharepoint_site_url , dynamodb_table_name)
+    uploader.config_sharepoint()
+    uploader.upload_files_to_s3()
+
+
