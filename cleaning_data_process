@@ -1,0 +1,165 @@
+import boto3
+from datetime import datetime
+import pandas as pd
+import json
+import io
+import re
+import os
+
+class Datacleaning:
+    def __init__(self):
+        self.dynamodb = boto3.resource('dynamodb', region_name='ap-south-1')
+        self.table = self.dynamodb.Table('raw_data_shrapoint')
+        self.cleansed_bucket = secret_dict['clean_bucket']
+        self.raw_data_bucket = secret_dict['raw_bucket']
+        self.tmp_dir = '/tmp' 
+    
+    def get_file_content(self, bucket_name, file_key):
+        s3 = boto3.client('s3')
+        response = s3.get_object(Bucket=bucket_name, Key=file_key)
+        file_content = response['Body'].read()
+        if file_key.endswith('.csv'):
+            kf = pd.read_csv(io.BytesIO(file_content), encoding='utf-8')
+        elif file_key.endswith('.json'):
+            json_content = json.loads(file_content)
+            kf = pd.json_normalize(json_content)
+        elif file_key.endswith('.txt'):
+            kf = pd.read_csv(io.BytesIO(file_content), encoding='utf-8')
+        elif file_key.endswith(('.xlsx')):
+            kf = pd.read_excel(io.BytesIO(file_content), engine='openpyxl')
+        elif file_key.endswith(('.xls')):
+            kf = pd.read_excel(io.BytesIO(file_content))
+        else:
+            raise ValueError(f"Unsupported file format for '{file_key}'.")
+        return kf
+    
+    def get_file_headers(self, bucket_name, file_key):
+        s3 = boto3.client('s3')
+        response = s3.get_object(Bucket=bucket_name, Key=file_key)
+        file_content = response['Body'].read()
+        if file_key.endswith('.csv'):
+            df = pd.read_csv(io.BytesIO(file_content), encoding='utf-8')
+        elif file_key.endswith('.json'):
+            json_content = json.loads(file_content)
+            df = pd.json_normalize(json_content)
+        elif file_key.endswith('.txt'):
+            df = pd.read_csv(io.BytesIO(file_content), encoding='utf-8')
+        elif file_key.endswith(('.xlsx')):
+            df = pd.read_excel(io.BytesIO(file_content), engine='openpyxl')
+        elif file_key.endswith(('.xls')):
+            df = pd.read_excel(io.BytesIO(file_content))
+        else:
+            raise ValueError(f"Unsupported file format for '{file_key}'.")
+        return df.columns.tolist()
+    
+    def cleaning_data(self, file_info):
+        if file_info['get_file'] == 'Y':
+            file_name = file_info['fileName']
+            file_group_id = file_info['fileGroupID']
+            file_id = file_info['fileID']
+            file_header = file_info['columnMetadata']
+            file_path = file_info['landing-rawBucket-path']
+            df = pd.DataFrame(file_header)
+            current_date = datetime(year=2024, month=4, day=14)
+            s3_bucket_key = f'{file_path}/{current_date.year}/{current_date.month}/{current_date.day}/{file_name}'
+    
+            s3 = boto3.resource('s3')
+            object = s3.Object(self.raw_data_bucket, s3_bucket_key)
+            file_size = object.content_length
+            if file_size > 0:
+                file_content = self.get_file_content(self.raw_data_bucket, s3_bucket_key)
+                s3_file_headers = self.get_file_headers(self.raw_data_bucket, s3_bucket_key)
+                column_names = [column_info['column_name'] for column_info in file_header if column_info.get('column_name')]
+                if s3_file_headers == column_names:
+                    if 'validation' in df:
+                        get_data = df.loc[df['validation'] == 'email_validation']
+                        rejected_email = pd.DataFrame()
+                        for i in get_data['column_name']:
+                            if i in file_content.columns:
+                                for email in file_content[i]:
+                                    try:
+                                        obj = re.search(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$", email)
+                                        if obj:
+                                            print("Valid Email")
+                                        else:
+                                            rejected_data = file_content.loc[file_content[i] == email]
+                                            rejected_email = pd.concat([rejected_email, rejected_data])
+                                            convert_csv_file = f'{self.tmp_dir}/rejected_email_{file_name}'
+                                            rejected_email.to_csv(convert_csv_file)
+                                            s3 = boto3.client('s3')
+                                            file_key = 'sharepoint/rejected_data/wrong_emails/'
+                                            with open(convert_csv_file, 'rb') as f:
+                                                s3.upload_fileobj(f, self.raw_data_bucket, file_key + convert_csv_file.split('/')[-1])
+                                            print(f'{file_name}file have wrong email, uploaded into the s3 {self.raw_data_bucket} ')
+                                    except Exception as e:
+                                        print(e)
+                    if 'validation' in df:
+                        get_phone = df.loc[df['validation'] == 'phone_number_validation']
+                        for i in get_phone['column_name']:
+                            if i in file_content.columns:
+                                rejected_num = pd.DataFrame()
+                                for phone in file_content[i]:
+                                    a = str(phone)
+                                    try:
+                                        pattern = re.compile("(0|91)?[-\s]?[6-9][0-9]{9}")
+                                        if pattern.match(a):
+                                            print("Phone number valid")
+                                        else:
+                                            rejected_data = file_content.loc[file_content[i] == phone]
+                                            rejected_num = pd.concat([rejected_num, rejected_data])
+                                            convert_csv_file = f'{self.tmp_dir}/Phone_no_rejected_{file_name}'
+                                            rejected_num.to_csv(convert_csv_file)
+                                            s3 = boto3.client('s3')
+                                            file_key = 'sharepoint/rejected_data/wrong_phone_numbers/'
+                                            with open(convert_csv_file, 'rb') as f:
+                                                s3.upload_fileobj(f, self.raw_data_bucket, file_key + convert_csv_file.split('/')[-1])
+                                            print(f'{file_name} file have rejcted numbers uploaded into the s3 {self.raw_data_bucket}')
+                                    except Exception as e:
+                                        print(e)
+                    if 'validation' in df:
+                        get_pk = df.loc[df['validation'] == 'duplicate_keys_validation']
+                        for primary_key in get_pk['column_name']:
+                            rejected_pk = pd.DataFrame()
+                            if primary_key in file_content:
+                                try:
+                                    df = pd.DataFrame(file_content)
+                                    duplicateRows = df[df.duplicated(primary_key)]
+                                    if not duplicateRows.empty:
+                                        rejected_pk = pd.concat([rejected_pk, duplicateRows])
+                                        convert_csv_file = f'{self.tmp_dir}/duplicate_pk_{file_name}'
+                                        rejected_pk.to_csv(convert_csv_file)
+                                        s3 = boto3.client('s3')
+                                        file_key = f'sharepoint/rejected_data/duplicate_key/'
+                                        with open(convert_csv_file, 'rb') as f:
+                                            s3.upload_fileobj(f, self.raw_data_bucket, file_key + convert_csv_file.split('/')[-1])
+                                        print(f'{file_name}file have duplicate value , uploaded into the s3 {self.raw_data_bucket} ')
+                                except Exception as e:
+                                    print(e)
+                    up = pd.DataFrame(file_content)
+                    try:
+                        sk = up.rename(columns=str.lower)
+                        sk.columns = sk.columns.str.replace(' ', '').str.replace('-', '_')
+                        jk = pd.DataFrame(sk)
+                        ak = jk.to_parquet(index=True)
+                        new_extension = ".parquet"
+                        base, extension = os.path.splitext(file_name)
+                        new_filename = base + new_extension
+                        current_date = datetime.now()
+                        s3_key = f'{file_path}/{current_date.year}/{current_date.month}/{current_date.day}/{new_filename}'
+                        s3 = boto3.client('s3')
+                        s3.put_object(Bucket=self.cleansed_bucket, Key=s3_key, Body=ak)
+                        print(f'File uploaded to S3 successfully at s3://{self.cleansed_bucket}/{s3_key}')
+                    except Exception as e:
+                        print(e)
+                else:
+                    print(f"Headers are not matching this file {file_name}")
+            else:
+                print(f"File is empty {file_name}")
+
+def lambda_handler(event, context):
+    data_processor = Datacleaning()
+    response = data_processor.table.scan()
+    files_info = response['Items']
+    for file_info in files_info:
+        data_processor.cleaning_data(file_info)
+
