@@ -1,0 +1,118 @@
+import pandas as pd
+import boto3
+import io
+from datetime import datetime
+import os
+
+CLEANSED_BUCKET = secret_dict['clean_bucket']
+HARMONISATION_BUCKET = 'secret_dict['harmo_bucket']
+
+class DataPulling:
+    def __init__(self):
+        self.cleansed_bucket = CLEANSED_BUCKET
+
+    def pull_all_files(self, specific_date):
+        s3 = boto3.client('s3')
+        response = s3.list_objects_v2(Bucket=self.cleansed_bucket)
+        file_locations = {}
+        if 'Contents' in response:
+            for obj in response['Contents']:
+                key = obj['Key']
+                if specific_date in key:
+                    file_name = key.split('/')[-1]
+                    file_locations[file_name] = key
+        return file_locations
+
+    def read_parquet_file(self, location):
+        s3 = boto3.client('s3')
+        obj = s3.get_object(Bucket=self.cleansed_bucket, Key=location)
+        body = obj['Body'].read()
+        buffer = io.BytesIO(body)
+        df = pd.read_parquet(buffer)
+        return df
+
+def lambda_handler(event, context):
+    data_puller = DataPulling()
+    specific_date = '2024/4/25'  # Specify the date you want to filter
+    file_locations = data_puller.pull_all_files(specific_date)
+    if file_locations:
+        for file_name, location in file_locations.items():
+            # Construct variable name dynamically
+            var_name = 'df_' + file_name.split('.')[0]
+            # Read Parquet file and assign it to the variable
+            globals()[var_name] = data_puller.read_parquet_file(location)
+
+    nurse_oncall_df = pd.merge(df_On_call, df_Nurse, left_on='nurse', right_on='employeeid', how='inner')
+    nurse_oncall_df.drop(['employeeid'], axis=1, inplace=True)
+
+    df_Department_physician = pd.merge(df_physician, df_Department, left_on='employeeid', right_on='head', how='left')
+    df_Department_physician.drop(['head'], axis=1, inplace=True)
+    df_Department_physician['departmentid'] = df_Department_physician['departmentid'].astype('Int64')
+    df_Department_physician = df_Department_physician.rename(columns={"name_x": "physician_name"})
+    df_Department_physician = df_Department_physician.rename(columns={"name_y": "department_name"})
+    df_Department_physician = df_Department_physician.rename(columns={"ssn": "physician_ssn"})
+
+    df_Affiliated_Department = pd.merge(df_Affiliated, df_Department, left_on='department', right_on='departmentid', how='left')
+    file_2 = pd.merge(df_physician, df_Affiliated_Department, left_on='employeeid', right_on='physician', how='left')
+    file_2.drop(['physician'], axis=1, inplace=True)
+    file_2.drop(['department'], axis=1, inplace=True)
+    file_2 = file_2.rename(columns={"name_y": "department_name"})
+
+    file_3 = pd.merge(file_2, df_Procedure, left_on='employeeid', right_on='code', how='left')
+    file_3['code'] = file_3['code'].astype('Int64')
+    file_3['cost'] = file_3['cost'].astype('Int64')
+    file_3 = file_3.rename(columns={"name": "procedure_name"})
+
+    file_4 = pd.merge(file_3, df_Trained_in, left_on='code', right_on='treatment', how='left')
+    file_4.drop(['physician'], axis=1, inplace=True)
+    file_4.drop(['treatment'], axis=1, inplace=True)
+
+    file_5 = pd.merge(file_4, df_Patient, left_on='employeeid', right_on='pcp', how='left')
+    file_5 = file_5.rename(columns={"name_x": "physician_name"})
+    file_5 = file_5.rename(columns={"ssn_x": "physician_ssn"})
+    file_5 = file_5.rename(columns={"ssn_y": "patient_ssn"})
+    file_5['insuranceid'] = file_5['insuranceid'].astype('Int64')
+    file_5['patient_ssn'] = file_5['patient_ssn'].astype('Int64')
+    file_5.drop(['pcp'], axis=1, inplace=True)
+
+    file_6 = pd.merge(file_5, df_Appointment, left_on='patient_ssn', right_on='patient', how='left')
+    file_6.drop(['physician'], axis=1, inplace=True)
+    file_6['patient'] = file_6['patient'].astype('Int64')
+    file_6['appointmentid'] = file_6['appointmentid'].astype('Int64')
+
+    df_Medication_prescribes = pd.merge(df_Medication, df_Prescribes, left_on='code', right_on='medication', how='inner')
+    df_Medication_prescribes = df_Medication_prescribes.rename(columns={"name": "medication_name"})
+    df_Medication_prescribes.drop(['code'], axis=1, inplace=True)
+    df_Medication_prescribes['appointment'] = df_Medication_prescribes['appointment'].astype('Int64')
+
+    file_7 = pd.merge(file_6, df_Medication_prescribes, left_on=['patient'], right_on=['patient'], how='left')
+    file_7.drop(['physician'], axis=1, inplace=True)
+    file_7['medication'] = file_7['medication'].astype('Int64')
+    file_7['dose'] = file_7['dose'].astype('Int64')
+    file_7['patient'] = file_7['patient'].astype('Int64')
+
+    file_8 = pd.merge(df_Undergoes, df_Stay, left_on=['patient'], right_on=['patient'], how='right')
+    file_9 = pd.merge(file_8, df_Room, left_on=['room'], right_on=['roomnumber'], how='left')
+    file_10 = pd.merge(file_9, df_On_call, left_on=['blockfloor', 'blockcode'], right_on=['blockfloor', 'blockcode'], how='left')
+    file_10.drop(['room'], axis=1, inplace=True)
+    file_10.drop(['stay'], axis=1, inplace=True)
+    file_10['physician'] = file_10['physician'].astype('Int64')
+
+    final_file = pd.merge(file_7, file_9, left_on=['patient'], right_on=['patient'], how='left')
+    final_file = final_file.drop_duplicates()
+    
+    
+    
+    
+    parquet_buffer = io.BytesIO()
+    final_file.to_parquet(parquet_buffer, engine='pyarrow', index=False)
+    parquet_buffer.seek(0)
+
+    # Put the Parquet data to S3
+    s3 = boto3.client('s3')
+    s3_key = 'sharepoint/final_file.parquet'
+    s3.put_object(Bucket=HARMONISATION_BUCKET, Key=s3_key, Body=parquet_buffer)
+    
+        
+
+    print("File uploaded")
