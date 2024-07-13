@@ -1,5 +1,5 @@
 # Configuration-Based Data Pipeline
-
+![project_io](https://github.com/user-attachments/assets/7018bdfa-307f-43ed-bc2f-60620adb3dd1)
 ## Overview
 This project implements a configuration-based data pipeline using AWS Lambda functions. It pulls data from SharePoint, processes it, and integrates it with other data sources. The project leverages DynamoDB for configuration management and AWS Secrets Manager for secure handling of credentials. The core functionality is divided into three main Lambda functions.
 
@@ -28,6 +28,7 @@ The project consists of three main Lambda functions:
 2. **cleaning_data_process**:
    - Description: This function processes and cleans the fetched data.
    - Purpose: To prepare the raw data for further analysis by cleaning and normalizing it.
+
 
 3. **converting_data_harmonised**:
    - Description: This function harmonizes and merges the cleaned data with other data sources.
